@@ -1,0 +1,280 @@
+local harpoon = require("harpoon")
+
+local Extensions = require("harpoon.extensions")
+
+local terminals = {
+  automated = true,
+  encode = false,
+  select_with_nil = true,
+  -- TODO: merge list to maintain user-defined order and allow removal via buffer
+  prepopulate = function()
+    local bufs = vim.api.nvim_list_bufs()
+    return vim
+      .iter(bufs)
+      :filter(function(buf)
+        return vim.bo[buf].buftype == "terminal"
+      end)
+      :map(function(buf)
+        local term = require("toggleterm.terminal").find(function(t)
+          return t.bufnr == buf
+        end)
+        local bufname = vim.api.nvim_buf_get_name(buf)
+        if term then
+          if term.display_name and (#bufname == 0 or #bufname > #term.display_name) then
+            bufname = term.display_name
+          else
+            bufname = string.format("%s [%d]", term:_display_name(), term.id)
+          end
+        end
+        return {
+          value = bufname,
+          context = {
+            bufnr = buf,
+          },
+        }
+      end)
+      :totable()
+  end,
+  remove = function(list_item, _list)
+    local bufnr = list_item.context.bufnr
+    vim.schedule(function()
+      if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+        require("bufdelete").bufdelete(bufnr, true)
+      end
+    end)
+  end,
+  select = function(list_item, _list, _opts)
+    if list_item.context.bufnr == nil or not vim.api.nvim_buf_is_valid(list_item.context.bufnr) then
+      -- create a new terminal if the buffer is invalid
+      local Terminal = require("toggleterm.terminal").Terminal
+      local term = Terminal:new({
+        display_name = list_item.value,
+      })
+      term:open()
+      list_item.context.bufnr = term.bufnr
+    else
+      -- jump to existing window containing the buffer
+      for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        local buf = vim.api.nvim_win_get_buf(win)
+        if buf == list_item.context.bufnr then
+          vim.api.nvim_set_current_win(win)
+          return
+        end
+      end
+    end
+
+    -- switch to the buffer if no window was found
+    vim.api.nvim_set_current_buf(list_item.context.bufnr)
+
+    Extensions.extensions:emit(Extensions.event_names.NAVIGATE, {
+      list = _list,
+      item = list_item,
+      buffer = list_item.context.bufnr,
+    })
+  end,
+}
+
+local files = {
+  prepopulate = function()
+    local Path = require("plenary.path")
+    local cwd = vim.uv.cwd()
+    local limit = 3
+    return vim
+      .iter(require("mini.visits").list_paths())
+      :enumerate()
+      :filter(function(i)
+        return i <= limit
+      end)
+      :map(function(_, path)
+        local p = Path:new(path):make_relative(cwd)
+        local buf = vim.fn.bufnr(p, false)
+        local row, col = 1, 1
+        if buf and vim.api.nvim_buf_is_valid(buf) then
+          if not vim.api.nvim_buf_is_loaded(buf) then
+            vim.fn.bufload(buf)
+          end
+          row, col = unpack(vim.api.nvim_buf_get_mark(buf, '"'))
+        end
+        return {
+          value = p,
+          context = {
+            row = row,
+            col = col,
+          },
+        }
+      end)
+      :totable()
+  end,
+}
+
+require("harpoon.config").DEFAULT_LIST = "files"
+
+harpoon:setup({
+  settings = {
+    save_on_toggle = true,
+    key = function()
+      return vim.uv.cwd() --[[@as string]]
+    end,
+  },
+  terminals = terminals,
+  files = files,
+  default = {},
+})
+
+local Path = require("plenary.path")
+local fidget = require("fidget")
+
+local titles = {
+  ADD = "added",
+  REMOVE = "removed",
+}
+
+local function notify(event, cx)
+  if not cx then
+    return
+  end
+
+  -- if cx.list and cx.list.config.automated then
+  --   return
+  -- end
+  local path = Path:new(cx.item.value) --[[@as Path]]
+
+  local display = path:make_relative(vim.uv.cwd()) or path:make_relative(vim.env.HOME) or path:normalize()
+
+  local handle = fidget.progress.handle.create({
+    lsp_client = {
+      name = "harpoon",
+    },
+    title = titles[event],
+    message = display,
+    level = vim.log.levels.ERROR,
+  })
+
+  vim.defer_fn(function()
+    handle:finish()
+  end, 500)
+end
+
+local function handler(evt)
+  return function(...)
+    notify(evt, ...)
+  end
+end
+
+---@param list HarpoonList
+---@param items HarpoonListItem[]
+local function add_items(list, items)
+  for _, item in ipairs(items) do
+    local exists = false
+    for _, list_item in ipairs(list.items) do
+      if list.config.equals(item, list_item) then
+        exists = true
+        break
+      end
+    end
+    if not exists then
+      list:add(item)
+    end
+  end
+end
+
+---@param list HarpoonList
+local function add_new_entries(list)
+  ---@diagnostic disable-next-line: undefined-field
+  if not list.config.prepopulate then
+    return
+  end
+
+  local sync_items =
+    ---@diagnostic disable-next-line: undefined-field
+    list.config.prepopulate(function(items)
+      if type(items) ~= "table" then
+        return
+      end
+      add_items(list, items)
+      -- if ui is open, buffer needs to be updated
+      -- so that items aren't removed immediately after being added
+      vim.schedule(function()
+        local ui_buf = harpoon.ui.bufnr
+        if ui_buf and vim.api.nvim_buf_is_valid(ui_buf) then
+          local lines = list:display()
+          vim.api.nvim_buf_set_lines(ui_buf, 0, -1, false, lines)
+        end
+      end)
+    end)
+  if sync_items and type(sync_items) == "table" then
+    add_items(list, sync_items)
+  end
+end
+
+---@param list HarpoonList
+local function prepopulate(list)
+  ---@diagnostic disable-next-line: undefined-field
+  if list.config.prepopulate and list:length() == 0 then
+    -- async via callback, or sync via return value
+    local sync_items =
+      ---@diagnostic disable-next-line: undefined-field
+      list.config.prepopulate(function(items)
+        if type(items) ~= "table" then
+          return
+        end
+        for _, item in ipairs(items) do
+          list:add(item)
+        end
+        -- if ui is open, buffer needs to be updated
+        -- so that items aren't removed immediately after being added
+        vim.schedule(function()
+          local ui_buf = harpoon.ui.bufnr
+          if ui_buf and vim.api.nvim_buf_is_valid(ui_buf) then
+            local lines = list:display()
+            vim.api.nvim_buf_set_lines(ui_buf, 0, -1, false, lines)
+          end
+        end)
+      end)
+    if sync_items and type(sync_items) == "table" then
+      for _, item in ipairs(sync_items) do
+        list:add(item)
+      end
+    end
+  end
+end
+
+harpoon:extend({
+  ADD = handler("ADD"),
+  REMOVE = function(cx)
+    notify("REMOVE", cx)
+    if cx.list.config.remove then
+      cx.list.config.remove(cx.item, cx.list)
+    end
+  end,
+  UI_CREATE = function(cx)
+    local win = cx.win_id
+    vim.wo[win].cursorline = true
+    vim.wo[win].signcolumn = "no"
+
+    local util = require("util.win")
+    util.update_config(win, function(config)
+      config.footer = harpoon.ui.active_list.name
+      config.footer_pos = "center"
+      config.width = math.floor(math.max(math.min(120, vim.o.columns / 2), 40))
+      config.col = math.floor(vim.o.columns / 2 - config.width / 2)
+      config.row = math.floor(vim.o.lines / 2 - config.height / 2)
+      return config
+    end)
+
+    vim.keymap.set("n", "<C-v>", function()
+      harpoon.ui:select_menu_item({ vsplit = true })
+    end, { buffer = cx.bufnr })
+    vim.keymap.set("n", "<C-s>", function()
+      harpoon.ui:select_menu_item({ split = true })
+    end, { buffer = cx.bufnr })
+  end,
+  ---@param list HarpoonList
+  LIST_READ = function(list)
+    ---@diagnostic disable-next-line: undefined-field
+    if list.config.automated then
+      add_new_entries(list)
+    end
+  end,
+  LIST_CREATED = prepopulate,
+})

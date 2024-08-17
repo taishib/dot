@@ -1,0 +1,9 @@
+# config_directory/config.toml
+[config]
+reload_apps = false
+set_wallpaper = false
+prefix = '@'
+
+[templates.alacritty]
+input_path = '~/.config/matugen/templates/alacritty.toml'
+output_path = '~/.config/alacritty/colors.toml'

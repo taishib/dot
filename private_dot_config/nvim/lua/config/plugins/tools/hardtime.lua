@@ -1,0 +1,33 @@
+require("hardtime").setup({
+  enabled = false,
+  disabled_filetypes = {
+    "qf",
+    "netrw",
+    "NvimTree",
+    "lazy",
+    "mason",
+    "oil",
+    "neo-tree",
+    "symbols-outline",
+    "vim-be-good",
+    "oil",
+    "outline",
+  },
+  restriction_mode = "hint",
+  restricted_keys = {
+    ["h"] = { "n", "x" },
+    ["l"] = { "n", "x" },
+    ["-"] = { "n", "x" },
+    ["+"] = { "n", "x" },
+    ["gj"] = { "n", "x" },
+    ["gk"] = { "n", "x" },
+    ["<C-N>"] = { "n", "x" },
+    ["<C-P>"] = { "n", "x" },
+  },
+  disabled_keys = {
+    ["<Up>"] = { "" },
+    ["<Down>"] = { "" },
+    ["<Left>"] = { "" },
+    ["<Right>"] = { "" },
+  },
+})
